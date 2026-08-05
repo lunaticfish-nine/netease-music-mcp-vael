@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
-import http.server, json, os, urllib.request, urllib.parse, threading, uuid, time
+import http.server, json, os, urllib.request, urllib.parse, threading, uuid, time, hmac
 from http.server import HTTPServer
 
 NETEASE_COOKIE = os.environ.get("NETEASE_COOKIE", "")
+MCP_SECRET = os.environ.get("MCP_SECRET", "")
 PORT = int(os.environ.get("MCP_PORT", "3456"))
 SESSION_ID = str(uuid.uuid4())
+
+def is_authorized_mcp_path(path):
+    """Allow MCP requests only at /mcp/<MCP_SECRET>."""
+    if not MCP_SECRET:
+        return False
+    request_path = path.split("?", 1)[0].rstrip("/")
+    expected_path = "/mcp/" + MCP_SECRET
+    return hmac.compare_digest(request_path, expected_path)
 
 def netease_request(url, data=None):
     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://music.163.com/', 'Cookie': NETEASE_COOKIE, 'Content-Type': 'application/x-www-form-urlencoded' if data else 'application/json'}
@@ -227,12 +236,10 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/health':
             self._json_response({"status": "ok", "tools": len(TOOLS)})
-        elif self.path.startswith('/sse'):
-            self._handle_sse()
         else:
             self.send_error(404)
     def do_POST(self):
-        if self.path.startswith('/mcp') or self.path.startswith('/message'):
+        if is_authorized_mcp_path(self.path):
             self._handle_mcp()
         else:
             self.send_error(404)
