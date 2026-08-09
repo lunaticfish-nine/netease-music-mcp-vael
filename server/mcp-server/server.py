@@ -4,8 +4,14 @@ from http.server import HTTPServer
 
 NETEASE_COOKIE = os.environ.get("NETEASE_COOKIE", "")
 MCP_SECRET = os.environ.get("MCP_SECRET", "")
+NOW_PLAYING_REPORTER_SECRET = os.environ.get("NOW_PLAYING_REPORTER_SECRET", "")
 PORT = int(os.environ.get("MCP_PORT", "3456"))
 SESSION_ID = str(uuid.uuid4())
+NOW_PLAYING_STALE_SECONDS = 90
+MAX_REPORT_BYTES = 8192
+ALLOWED_NETEASE_PACKAGES = {"com.netease.cloudmusic"}
+NOW_PLAYING_STATE = None
+NOW_PLAYING_LOCK = threading.Lock()
 
 def is_authorized_mcp_path(path):
     """Allow MCP requests only at /mcp/<MCP_SECRET>."""
@@ -14,6 +20,99 @@ def is_authorized_mcp_path(path):
     request_path = path.split("?", 1)[0].rstrip("/")
     expected_path = "/mcp/" + MCP_SECRET
     return hmac.compare_digest(request_path, expected_path)
+
+def is_authorized_reporter_path(path):
+    """Allow Android reports only at /now-playing/<NOW_PLAYING_REPORTER_SECRET>."""
+    if not NOW_PLAYING_REPORTER_SECRET:
+        return False
+    request_path = path.split("?", 1)[0].rstrip("/")
+    expected_path = "/now-playing/" + NOW_PLAYING_REPORTER_SECRET
+    return hmac.compare_digest(request_path, expected_path)
+
+def _clean_text(value, max_length):
+    if value is None:
+        return ""
+    return str(value).strip()[:max_length]
+
+def _clean_non_negative_number(value):
+    if value is None or value == "":
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number < 0:
+        return None
+    return number
+
+def update_now_playing_state(payload, now=None):
+    """Validate and store a privacy-scoped Android NetEase playback snapshot."""
+    if not isinstance(payload, dict):
+        raise ValueError("JSON object required")
+    package_name = _clean_text(payload.get("source_package"), 128)
+    if package_name not in ALLOWED_NETEASE_PACKAGES:
+        raise ValueError("Unsupported source package")
+    status = _clean_text(payload.get("status"), 16).lower()
+    if status not in {"playing", "paused", "stopped", "idle", "unknown"}:
+        raise ValueError("Invalid playback status")
+    received_at = float(now if now is not None else time.time())
+    state = {
+        "source_package": package_name,
+        "title": _clean_text(payload.get("title"), 300),
+        "artist": _clean_text(payload.get("artist"), 300),
+        "album": _clean_text(payload.get("album"), 300),
+        "status": status,
+        "position_ms": _clean_non_negative_number(payload.get("position_ms")),
+        "duration_ms": _clean_non_negative_number(payload.get("duration_ms")),
+        "playback_speed": _clean_non_negative_number(payload.get("playback_speed")),
+        "captured_at": _clean_non_negative_number(payload.get("captured_at")),
+        "received_at": received_at,
+    }
+    global NOW_PLAYING_STATE
+    with NOW_PLAYING_LOCK:
+        NOW_PLAYING_STATE = state
+    return state
+
+def _format_milliseconds(value):
+    if value is None:
+        return "未知"
+    total_seconds = max(0, int(value / 1000))
+    return "%02d:%02d" % (total_seconds // 60, total_seconds % 60)
+
+def get_current_track(now=None):
+    """Return the freshest Android playback snapshot to the MCP client."""
+    with NOW_PLAYING_LOCK:
+        state = dict(NOW_PLAYING_STATE) if NOW_PLAYING_STATE else None
+    if not state:
+        return "手机尚未上报网易云播放状态。请确认 Android 采集器已运行并获得通知使用权。"
+    current_time = float(now if now is not None else time.time())
+    age = max(0.0, current_time - state["received_at"])
+    if age > NOW_PLAYING_STALE_SECONDS:
+        return "手机播放状态已离线（最后更新于 %d 秒前）。" % int(age)
+    status = state["status"]
+    if status in {"stopped", "idle", "unknown"}:
+        return "手机网易云当前没有正在播放的歌曲（状态更新于 %d 秒前）。" % int(age)
+    position_ms = state.get("position_ms")
+    if status == "playing" and position_ms is not None:
+        speed = state.get("playback_speed")
+        if speed is None:
+            speed = 1.0
+        position_ms += age * 1000 * speed
+    duration_ms = state.get("duration_ms")
+    if position_ms is not None and duration_ms is not None:
+        position_ms = min(position_ms, duration_ms)
+    status_text = "播放中" if status == "playing" else "已暂停"
+    title = state.get("title") or "未知歌曲"
+    artist = state.get("artist") or "未知歌手"
+    lines = [
+        "当前播放：%s - %s" % (title, artist),
+        "状态：%s" % status_text,
+        "进度：%s / %s" % (_format_milliseconds(position_ms), _format_milliseconds(duration_ms)),
+        "状态更新时间：%d 秒前" % int(age),
+    ]
+    if state.get("album"):
+        lines.insert(1, "专辑：%s" % state["album"])
+    return "\n".join(lines)
 
 def netease_request(url, data=None):
     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://music.163.com/', 'Cookie': NETEASE_COOKIE, 'Content-Type': 'application/x-www-form-urlencoded' if data else 'application/json'}
@@ -188,6 +287,7 @@ TOOLS = [
     {"name": "list_my_playlists", "description": "List all playlists of the logged-in user.", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "get_playlist_songs", "description": "Get all songs in a playlist.", "inputSchema": {"type": "object", "properties": {"playlist_id": {"type": "integer", "description": "Playlist ID"}}, "required": ["playlist_id"]}},
     {"name": "get_play_history", "description": "Get recent play history.", "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "description": "Number of records, default 30"}, "all_time": {"type": "boolean", "description": "true=all time, false=this week (default)"}}}},
+    {"name": "get_current_track", "description": "Get the current NetEase Cloud Music track reported by the user's Android phone.", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "like_song", "description": "Like or unlike a song.", "inputSchema": {"type": "object", "properties": {"song_id": {"type": "integer", "description": "Song ID"}, "like": {"type": "boolean", "description": "true=like, false=unlike"}}, "required": ["song_id"]}},
     {"name": "daily_recommend", "description": "Get today's personalized recommendations.", "inputSchema": {"type": "object", "properties": {}}}
 ]
@@ -196,7 +296,7 @@ def handle_jsonrpc(body):
     method = body.get('method', '')
     req_id = body.get('id')
     if method == 'initialize':
-        return {"jsonrpc": "2.0", "id": req_id, "result": {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "netease-music-mcp", "version": "2.0.0"}}}
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "netease-music-mcp", "version": "2.1.0"}}}
     elif method == 'tools/list':
         return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}}
     elif method == 'tools/call':
@@ -216,6 +316,8 @@ def handle_jsonrpc(body):
             text = get_playlist_songs(args.get('playlist_id'))
         elif name == 'get_play_history':
             text = get_play_history(args.get('limit', 30), args.get('all_time', False))
+        elif name == 'get_current_track':
+            text = get_current_track()
         elif name == 'like_song':
             text = like_song(args.get('song_id'), args.get('like', True))
         elif name == 'daily_recommend':
@@ -241,6 +343,8 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         if is_authorized_mcp_path(self.path):
             self._handle_mcp()
+        elif is_authorized_reporter_path(self.path):
+            self._handle_now_playing_report()
         else:
             self.send_error(404)
     def _cors(self):
@@ -253,7 +357,23 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'application/json')
         self.send_header('Mcp-Session-Id', SESSION_ID)
         self.end_headers()
-        self.wfile.write(json.dumps(data).encode())
+        self.wfile.write(json.dumps(data, ensure_ascii=False).encode())
+    def _handle_now_playing_report(self):
+        try:
+            length = int(self.headers.get('Content-Length', 0))
+        except (TypeError, ValueError):
+            self._json_response({"ok": False, "error": "Invalid Content-Length"}, 400)
+            return
+        if length <= 0 or length > MAX_REPORT_BYTES:
+            self._json_response({"ok": False, "error": "Invalid report size"}, 400)
+            return
+        try:
+            payload = json.loads(self.rfile.read(length).decode('utf-8'))
+            update_now_playing_state(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            self._json_response({"ok": False, "error": str(exc)}, 400)
+            return
+        self._json_response({"ok": True})
     def _handle_mcp(self):
         length = int(self.headers.get('Content-Length', 0))
         body = json.loads(self.rfile.read(length)) if length else {}
