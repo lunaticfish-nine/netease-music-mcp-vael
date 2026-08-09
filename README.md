@@ -21,6 +21,7 @@
 - 📊 **听歌记录** — 看你最近在循环什么、播了几次
 - ❤️ **收藏** — 红心 / 取消红心
 - ✨ **每日推荐** — 获取今天app给你的 30 首个性化推荐（机也要品鉴！）
+- 📱 **手机正在播放** — 通过可选 Android 上报器读取当前歌曲、播放状态和进度
 
 
 
@@ -130,6 +131,14 @@ http://你的服务器IP:3456/mcp
 ```
 
 应该显示 9 个工具已连接。
+
+启用 Android 正在播放功能后会显示 10 个工具。Android App 的构建、安装和隐私说明见 [`android-now-playing/README.md`](android-now-playing/README.md)。云端还需要新增独立环境变量：
+
+```text
+NOW_PLAYING_REPORTER_SECRET=另一个至少32字符的随机密钥
+```
+
+该密钥仅用于手机向 `/now-playing/<密钥>` 写入最新播放快照，不要与 `MCP_SECRET` 共用。
 
 ---
 
