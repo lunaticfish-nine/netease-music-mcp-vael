@@ -369,7 +369,10 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             return
         try:
             payload = json.loads(self.rfile.read(length).decode('utf-8'))
-            update_now_playing_state(payload)
+            if not isinstance(payload, dict):
+                raise ValueError("JSON object required")
+            if payload.get("test_only") is not True:
+                update_now_playing_state(payload)
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             self._json_response({"ok": False, "error": str(exc)}, 400)
             return

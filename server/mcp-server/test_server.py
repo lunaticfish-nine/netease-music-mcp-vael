@@ -87,6 +87,15 @@ class NowPlayingTests(unittest.TestCase):
             with urllib.request.urlopen(report_request, timeout=3) as response:
                 self.assertEqual({"ok": True}, json.load(response))
 
+            probe_request = urllib.request.Request(
+                base_url + "/now-playing/report-test-secret",
+                data=json.dumps({"test_only": True}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(probe_request, timeout=3) as response:
+                self.assertEqual({"ok": True}, json.load(response))
+
             mcp_body = {
                 "jsonrpc": "2.0",
                 "id": 2,
