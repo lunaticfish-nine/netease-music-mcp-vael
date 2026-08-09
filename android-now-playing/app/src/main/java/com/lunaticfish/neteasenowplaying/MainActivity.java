@@ -136,6 +136,7 @@ public class MainActivity extends Activity {
             payload.put("artist", "");
             payload.put("album", "");
             payload.put("status", "idle");
+            payload.put("test_only", true);
             payload.put("captured_at", System.currentTimeMillis() / 1000.0);
             NowPlayingUploader.upload(this, payload,
                     (success, message) -> toast(message));

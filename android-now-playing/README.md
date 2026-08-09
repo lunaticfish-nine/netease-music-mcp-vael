@@ -20,6 +20,13 @@ cd android-now-playing
 gradle :app:assembleDebug
 ```
 
+## Real-time reliability
+
+- Version 0.2 listens for active media-session changes and also refreshes every 5 seconds.
+- The connection-test button verifies HTTPS credentials without replacing the latest song state.
+- On phones with aggressive battery management, allow this app to auto-start and run in the background, and set battery usage to unrestricted.
+- Keep NetEase Cloud Music playback notifications enabled. The app never reads notifications from other packages.
+
 ## 手机配置
 
 1. 在 Zeabur 为 MCP 服务新增 `NOW_PLAYING_REPORTER_SECRET`，使用独立的至少 32 字符随机值，并重新部署。

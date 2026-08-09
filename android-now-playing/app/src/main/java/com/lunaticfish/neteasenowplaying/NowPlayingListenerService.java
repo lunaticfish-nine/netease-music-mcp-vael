@@ -18,9 +18,11 @@ import java.util.List;
 
 public class NowPlayingListenerService extends NotificationListenerService {
     private static final String NETEASE_PACKAGE = "com.netease.cloudmusic";
-    private static final long HEARTBEAT_MS = 30000;
+    private static final long HEARTBEAT_MS = 5000;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private MediaSessionManager sessionManager;
+    private MediaSessionManager.OnActiveSessionsChangedListener sessionsChangedListener;
     private MediaController currentController;
     private MediaController.Callback currentCallback;
 
@@ -38,6 +40,7 @@ public class NowPlayingListenerService extends NotificationListenerService {
     public void onListenerConnected() {
         super.onListenerConnected();
         handler.removeCallbacks(heartbeat);
+        registerSessionsListener();
         refreshController();
         handler.postDelayed(heartbeat, HEARTBEAT_MS);
     }
@@ -45,6 +48,7 @@ public class NowPlayingListenerService extends NotificationListenerService {
     @Override
     public void onListenerDisconnected() {
         unregisterController();
+        unregisterSessionsListener();
         handler.removeCallbacks(heartbeat);
         super.onListenerDisconnected();
     }
@@ -74,15 +78,64 @@ public class NowPlayingListenerService extends NotificationListenerService {
     @Override
     public void onDestroy() {
         unregisterController();
+        unregisterSessionsListener();
         handler.removeCallbacks(heartbeat);
         super.onDestroy();
     }
 
+    private void registerSessionsListener() {
+        unregisterSessionsListener();
+        try {
+            sessionManager = getSystemService(MediaSessionManager.class);
+            if (sessionManager == null) {
+                return;
+            }
+            ComponentName listener = new ComponentName(this, getClass());
+            sessionsChangedListener = controllers -> {
+                if (!publishFromControllers(controllers)) {
+                    publishStopped();
+                }
+            };
+            sessionManager.addOnActiveSessionsChangedListener(
+                    sessionsChangedListener, listener, handler);
+        } catch (SecurityException ignored) {
+            sessionManager = null;
+            sessionsChangedListener = null;
+        }
+    }
+
+    private void unregisterSessionsListener() {
+        if (sessionManager != null && sessionsChangedListener != null) {
+            try {
+                sessionManager.removeOnActiveSessionsChangedListener(
+                        sessionsChangedListener);
+            } catch (Exception ignored) {
+                // The listener may already have been removed by Android.
+            }
+        }
+        sessionsChangedListener = null;
+        sessionManager = null;
+    }
+
     private boolean refreshController() {
         try {
-            MediaSessionManager manager = getSystemService(MediaSessionManager.class);
+            MediaSessionManager manager = sessionManager != null
+                    ? sessionManager : getSystemService(MediaSessionManager.class);
+            if (manager == null) {
+                return false;
+            }
             ComponentName listener = new ComponentName(this, getClass());
             List<MediaController> controllers = manager.getActiveSessions(listener);
+            return publishFromControllers(controllers);
+        } catch (SecurityException ignored) {
+            // Notification access has not been granted yet.
+        }
+        unregisterController();
+        return false;
+    }
+
+    private boolean publishFromControllers(List<MediaController> controllers) {
+        if (controllers != null) {
             for (MediaController controller : controllers) {
                 if (NETEASE_PACKAGE.equals(controller.getPackageName())) {
                     attachController(controller);
@@ -90,8 +143,6 @@ public class NowPlayingListenerService extends NotificationListenerService {
                     return true;
                 }
             }
-        } catch (SecurityException ignored) {
-            // Notification access has not been granted yet.
         }
         unregisterController();
         return false;
