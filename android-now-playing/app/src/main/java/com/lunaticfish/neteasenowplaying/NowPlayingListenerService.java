@@ -15,10 +15,13 @@ import android.service.notification.StatusBarNotification;
 import org.json.JSONObject;
 
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class NowPlayingListenerService extends NotificationListenerService {
     private static final String NETEASE_PACKAGE = "com.netease.cloudmusic";
     private static final long HEARTBEAT_MS = 5000;
+    private static final Pattern SONG_URI_ID = Pattern.compile("(?:[?&]id=|/song/)(\\d+)(?:\\D|$)");
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private MediaSessionManager sessionManager;
@@ -202,6 +205,7 @@ public class NowPlayingListenerService extends NotificationListenerService {
                     MediaMetadata.METADATA_KEY_ALBUM_ARTIST,
                     MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE);
             String album = metadataText(metadata, MediaMetadata.METADATA_KEY_ALBUM);
+            String songId = extractSongId(metadata);
             long duration = metadata == null ? -1
                     : metadata.getLong(MediaMetadata.METADATA_KEY_DURATION);
             long position = playbackState == null ? -1 : playbackState.getPosition();
@@ -217,6 +221,9 @@ public class NowPlayingListenerService extends NotificationListenerService {
             payload.put("title", title);
             payload.put("artist", artist);
             payload.put("album", album);
+            if (!songId.isEmpty()) {
+                payload.put("song_id", songId);
+            }
             if (position >= 0) {
                 payload.put("position_ms", position);
             }
@@ -296,5 +303,21 @@ public class NowPlayingListenerService extends NotificationListenerService {
             }
         }
         return "";
+    }
+
+    private String extractSongId(MediaMetadata metadata) {
+        if (metadata == null) {
+            return "";
+        }
+        String mediaId = metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_ID);
+        if (mediaId != null && mediaId.matches("\\d{1,20}")) {
+            return mediaId;
+        }
+        String mediaUri = metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_URI);
+        if (mediaUri == null) {
+            return "";
+        }
+        Matcher matcher = SONG_URI_ID.matcher(mediaUri);
+        return matcher.find() ? matcher.group(1) : "";
     }
 }

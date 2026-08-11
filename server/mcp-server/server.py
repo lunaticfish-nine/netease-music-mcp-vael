@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import http.server, json, os, urllib.request, urllib.parse, threading, uuid, time, hmac
+import http.server, json, os, re, urllib.request, urllib.parse, threading, uuid, time, hmac
 from http.server import HTTPServer
 
 NETEASE_COOKIE = os.environ.get("NETEASE_COOKIE", "")
@@ -12,6 +12,9 @@ MAX_REPORT_BYTES = 8192
 ALLOWED_NETEASE_PACKAGES = {"com.netease.cloudmusic"}
 NOW_PLAYING_STATE = None
 NOW_PLAYING_LOCK = threading.Lock()
+LYRIC_CACHE = {}
+LYRIC_CACHE_LOCK = threading.Lock()
+LYRIC_CACHE_SECONDS = 3600
 
 def is_authorized_mcp_path(path):
     """Allow MCP requests only at /mcp/<MCP_SECRET>."""
@@ -45,6 +48,15 @@ def _clean_non_negative_number(value):
         return None
     return number
 
+def _clean_song_id(value):
+    if value is None or value == "":
+        return None
+    try:
+        song_id = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return song_id if song_id > 0 else None
+
 def update_now_playing_state(payload, now=None):
     """Validate and store a privacy-scoped Android NetEase playback snapshot."""
     if not isinstance(payload, dict):
@@ -61,6 +73,7 @@ def update_now_playing_state(payload, now=None):
         "title": _clean_text(payload.get("title"), 300),
         "artist": _clean_text(payload.get("artist"), 300),
         "album": _clean_text(payload.get("album"), 300),
+        "song_id": _clean_song_id(payload.get("song_id")),
         "status": status,
         "position_ms": _clean_non_negative_number(payload.get("position_ms")),
         "duration_ms": _clean_non_negative_number(payload.get("duration_ms")),
@@ -78,6 +91,81 @@ def _format_milliseconds(value):
         return "未知"
     total_seconds = max(0, int(value / 1000))
     return "%02d:%02d" % (total_seconds // 60, total_seconds % 60)
+
+def _normalize_song_text(value):
+    return "".join(character for character in str(value or "").casefold() if character.isalnum())
+
+def _resolve_song_id(title, artist):
+    """Find a song only when both title and artist exactly match a search result."""
+    normalized_title = _normalize_song_text(title)
+    normalized_artist = _normalize_song_text(artist)
+    if not normalized_title or not normalized_artist:
+        return None
+    query = urllib.parse.quote((str(title) + " " + str(artist)).strip())
+    response = netease_request(
+        "https://music.163.com/api/search/get?s=" + query + "&type=1&limit=10"
+    )
+    for song in response.get("result", {}).get("songs", []):
+        song_title = _normalize_song_text(song.get("name"))
+        song_artists = _normalize_song_text(
+            " ".join(artist_item.get("name", "") for artist_item in song.get("artists", []))
+        )
+        song_id = _clean_song_id(song.get("id"))
+        if song_id and song_title == normalized_title and song_artists == normalized_artist:
+            return song_id
+    return None
+
+def _parse_lrc(lyric_text):
+    """Return sorted (millisecond, text) entries from NetEase timed LRC text."""
+    timestamp_pattern = re.compile(r"\[(\d{1,3}):(\d{2})(?:\.(\d{1,3}))?\]")
+    entries = []
+    for raw_line in str(lyric_text or "").splitlines():
+        timestamps = list(timestamp_pattern.finditer(raw_line))
+        if not timestamps:
+            continue
+        text = timestamp_pattern.sub("", raw_line).strip()
+        if not text:
+            continue
+        for timestamp in timestamps:
+            minutes = int(timestamp.group(1))
+            seconds = int(timestamp.group(2))
+            fraction = (timestamp.group(3) or "").ljust(3, "0")[:3]
+            entries.append(((minutes * 60 + seconds) * 1000 + int(fraction), text[:300]))
+    return sorted(entries, key=lambda entry: entry[0])
+
+def _get_lyric_lines(song_id):
+    cache_key = str(song_id)
+    now = time.time()
+    with LYRIC_CACHE_LOCK:
+        cached = LYRIC_CACHE.get(cache_key)
+        if cached and now - cached["cached_at"] < LYRIC_CACHE_SECONDS:
+            return cached["lines"]
+    response = netease_request(
+        "https://music.163.com/api/song/lyric?id=" + cache_key + "&lv=-1&kv=-1&tv=-1"
+    )
+    lyric_text = response.get("lrc", {}).get("lyric", "")
+    lines = _parse_lrc(lyric_text)
+    with LYRIC_CACHE_LOCK:
+        LYRIC_CACHE[cache_key] = {"cached_at": now, "lines": lines}
+    return lines
+
+def _get_current_lyric_line(state, position_ms):
+    if position_ms is None:
+        return None, "暂无播放进度，无法定位歌词。"
+    song_id = state.get("song_id") or _resolve_song_id(state.get("title"), state.get("artist"))
+    if not song_id:
+        return None, "未能确认歌曲 ID，暂不匹配歌词。"
+    lines = _get_lyric_lines(song_id)
+    if not lines:
+        return None, "该歌曲没有可用的逐行时间歌词。"
+    current_line = None
+    for timestamp_ms, lyric_line in lines:
+        if timestamp_ms > position_ms:
+            break
+        current_line = lyric_line
+    if current_line is None:
+        return None, "前奏中。"
+    return current_line, None
 
 def get_current_track(now=None):
     """Return the freshest Android playback snapshot to the MCP client."""
@@ -112,6 +200,11 @@ def get_current_track(now=None):
     ]
     if state.get("album"):
         lines.insert(1, "专辑：%s" % state["album"])
+    lyric, lyric_message = _get_current_lyric_line(state, position_ms)
+    if lyric:
+        lines.append("当前歌词：" + lyric)
+    elif lyric_message:
+        lines.append("歌词：" + lyric_message)
     return "\n".join(lines)
 
 def netease_request(url, data=None):
@@ -264,19 +357,35 @@ def update_playlist_info(playlist_id, name=None, description=None, confirm=False
     csrf = get_csrf()
     if not csrf:
         return "Failed: __csrf is missing from NETEASE_COOKIE."
-    url = 'https://music.163.com/api/playlist/update?csrf_token=' + csrf
-    data = {
-        'id': str(playlist_id),
-        'name': new_name,
-        'desc': new_description,
-        'tags': json.dumps(playlist.get('tags') or [], ensure_ascii=False),
-    }
-    resp = netease_request(url, data=data)
-    if resp.get('code') == 200:
-        description_status = "cleared" if description == "" else "updated"
-        return ("Updated playlist ID " + str(playlist_id) + ": name='" +
-                new_name + "', description " + description_status + ".")
-    return "Failed: " + resp.get('message', resp.get('error', 'unknown'))
+    name_changed = name is None
+    if name is not None:
+        name_response = netease_request(
+            'https://music.163.com/api/playlist/name/update?csrf_token=' + csrf,
+            data={'id': str(playlist_id), 'name': new_name},
+        )
+        if name_response.get('code') != 200:
+            return "Failed to update playlist name: " + name_response.get(
+                'message', name_response.get('error', 'unknown')
+            )
+        name_changed = True
+
+    if description is not None:
+        description_response = netease_request(
+            'https://music.163.com/api/playlist/desc/update?csrf_token=' + csrf,
+            data={'id': str(playlist_id), 'desc': new_description},
+        )
+        if description_response.get('code') != 200:
+            prefix = " Playlist name was updated first." if name_changed and name is not None else ""
+            return "Failed to update playlist description:" + prefix + " " + description_response.get(
+                'message', description_response.get('error', 'unknown')
+            )
+
+    result_parts = []
+    if name is not None:
+        result_parts.append("name='" + new_name + "'")
+    if description is not None:
+        result_parts.append("description " + ("cleared" if description == "" else "updated"))
+    return "Updated playlist ID " + str(playlist_id) + ": " + ", ".join(result_parts) + "."
 
 def get_playlist_songs(playlist_id):
     url = 'https://music.163.com/api/v6/playlist/detail?id=' + str(playlist_id)
@@ -361,7 +470,7 @@ def handle_jsonrpc(body):
     method = body.get('method', '')
     req_id = body.get('id')
     if method == 'initialize':
-        return {"jsonrpc": "2.0", "id": req_id, "result": {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "netease-music-mcp", "version": "2.2.0"}}}
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "netease-music-mcp", "version": "2.3.0"}}}
     elif method == 'tools/list':
         return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}}
     elif method == 'tools/call':

@@ -22,10 +22,16 @@ gradle :app:assembleDebug
 
 ## Real-time reliability
 
-- Version 0.2 listens for active media-session changes and also refreshes every 5 seconds.
+- Version 0.3 listens for active media-session changes and also refreshes every 5 seconds.
 - The connection-test button verifies HTTPS credentials without replacing the latest song state.
 - On phones with aggressive battery management, allow this app to auto-start and run in the background, and set battery usage to unrestricted.
 - Keep NetEase Cloud Music playback notifications enabled. The app never reads notifications from other packages.
+
+## Current lyric line
+
+- Version 0.3.0 sends a NetEase song ID when the active Android media session exposes one.
+- The server uses the playback position and that ID to include one time-synced lyric line in `get_current_track`.
+- If Android does not expose a song ID, the server only falls back to an exact title-and-artist match; ambiguous matches deliberately return no lyric line.
 
 ## 手机配置
 
