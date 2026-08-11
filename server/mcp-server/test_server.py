@@ -5,6 +5,7 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+from unittest.mock import patch
 
 
 SERVER_PATH = pathlib.Path(__file__).with_name("server.py")
@@ -66,11 +67,85 @@ class NowPlayingTests(unittest.TestCase):
         server.update_now_playing_state(self.sample_payload(), now=1000)
         self.assertIn("已离线", server.get_current_track(now=1091))
 
-    def test_mcp_exposes_tenth_tool(self):
+    def test_mcp_exposes_current_tools(self):
         response = server.handle_jsonrpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         names = [tool["name"] for tool in response["result"]["tools"]]
-        self.assertEqual(10, len(names))
+        self.assertEqual(11, len(names))
         self.assertIn("get_current_track", names)
+
+
+class PlaylistUpdateTests(unittest.TestCase):
+    def setUp(self):
+        server.MCP_SECRET = "mcp-test-secret"
+        server.NOW_PLAYING_REPORTER_SECRET = "report-test-secret"
+        with server.NOW_PLAYING_LOCK:
+            server.NOW_PLAYING_STATE = None
+
+    def sample_payload(self, **overrides):
+        payload = {
+            "source_package": "com.netease.cloudmusic",
+            "title": "Test Song",
+            "artist": "Test Artist",
+            "album": "Test Album",
+            "status": "playing",
+            "position_ms": 30000,
+            "duration_ms": 180000,
+            "playback_speed": 1.0,
+            "captured_at": 1000,
+        }
+        payload.update(overrides)
+        return payload
+
+    def owned_playlist(self):
+        return {
+            "id": 123,
+            "name": "Original name",
+            "description": "Original description",
+            "tags": ["rock"],
+            "creator": {"userId": 7},
+        }
+
+    def test_update_playlist_rejects_collected_playlist(self):
+        collected = self.owned_playlist()
+        collected["creator"] = {"userId": 8}
+        with patch.object(server, "get_uid", return_value=7), \
+                patch.object(server, "netease_request", return_value={"playlist": collected}) as request:
+            result = server.update_playlist_info(123, name="New name", confirm=True)
+        self.assertIn("Refused", result)
+        self.assertEqual(1, request.call_count)
+
+    def test_update_playlist_preview_does_not_write(self):
+        with patch.object(server, "get_uid", return_value=7), \
+                patch.object(server, "netease_request", return_value={"playlist": self.owned_playlist()}) as request:
+            result = server.update_playlist_info(123, name="New name")
+        self.assertIn("Preview only", result)
+        self.assertIn("New name", result)
+        self.assertEqual(1, request.call_count)
+
+    def test_update_playlist_preserves_unset_description(self):
+        calls = []
+
+        def fake_request(url, data=None):
+            calls.append((url, data))
+            if "playlist/detail" in url:
+                return {"playlist": self.owned_playlist()}
+            return {"code": 200}
+
+        with patch.object(server, "get_uid", return_value=7), \
+                patch.object(server, "get_csrf", return_value="csrf-token"), \
+                patch.object(server, "netease_request", side_effect=fake_request):
+            result = server.update_playlist_info(123, name="New name", confirm=True)
+        self.assertIn("Updated playlist ID 123", result)
+        self.assertEqual(2, len(calls))
+        self.assertEqual("New name", calls[1][1]["name"])
+        self.assertEqual("Original description", calls[1][1]["desc"])
+        self.assertEqual('["rock"]', calls[1][1]["tags"])
+
+    def test_mcp_exposes_playlist_update_tool(self):
+        response = server.handle_jsonrpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        names = [tool["name"] for tool in response["result"]["tools"]]
+        self.assertEqual(11, len(names))
+        self.assertIn("update_playlist_info", names)
 
     def test_report_endpoint_and_mcp_tool_work_end_to_end(self):
         httpd = server.ThreadedHTTPServer(("127.0.0.1", 0), server.MCPHandler)
