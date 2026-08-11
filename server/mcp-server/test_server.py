@@ -168,7 +168,8 @@ class PlaylistUpdateTests(unittest.TestCase):
             result = server.update_playlist_info(123, name="New name")
         self.assertIn("Updated playlist ID 123", result)
         self.assertEqual(2, len(calls))
-        self.assertIn("playlist/name/update", calls[1][0])
+        self.assertIn("playlist/update/name", calls[1][0])
+        self.assertNotIn("playlist/name/update", calls[1][0])
         self.assertEqual("New name", calls[1][1]["name"])
 
     def test_update_playlist_uses_description_endpoint_and_reports_partial_failure(self):
@@ -178,7 +179,7 @@ class PlaylistUpdateTests(unittest.TestCase):
             calls.append((url, data))
             if "playlist/detail" in url:
                 return {"playlist": self.owned_playlist()}
-            if "playlist/name/update" in url:
+            if "playlist/update/name" in url:
                 return {"code": 200}
             return {"code": 500, "message": "description rejected"}
 
