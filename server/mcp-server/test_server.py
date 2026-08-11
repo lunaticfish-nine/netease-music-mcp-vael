@@ -20,6 +20,8 @@ class NowPlayingTests(unittest.TestCase):
         server.NOW_PLAYING_REPORTER_SECRET = "report-test-secret"
         with server.NOW_PLAYING_LOCK:
             server.NOW_PLAYING_STATE = None
+        with server.LYRIC_CACHE_LOCK:
+            server.LYRIC_CACHE.clear()
 
     def sample_payload(self, **overrides):
         payload = {
@@ -27,6 +29,7 @@ class NowPlayingTests(unittest.TestCase):
             "title": "Test Song",
             "artist": "Test Artist",
             "album": "Test Album",
+            "song_id": 12345,
             "status": "playing",
             "position_ms": 30000,
             "duration_ms": 180000,
@@ -66,6 +69,28 @@ class NowPlayingTests(unittest.TestCase):
     def test_stale_state_is_reported_offline(self):
         server.update_now_playing_state(self.sample_payload(), now=1000)
         self.assertIn("已离线", server.get_current_track(now=1091))
+
+    def test_timed_lyric_parser_handles_multiple_timestamps(self):
+        parsed = server._parse_lrc("[00:01.50]First line\n[00:03.000][00:04.00]Second line")
+        self.assertEqual([(1500, "First line"), (3000, "Second line"), (4000, "Second line")], parsed)
+
+    def test_current_track_uses_reported_song_id_for_lyric(self):
+        server.update_now_playing_state(self.sample_payload(position_ms=4000), now=1000)
+        with patch.object(server, "_get_lyric_lines", return_value=[
+            (1000, "First line"), (3000, "Current line"), (8000, "Next line")
+        ]), patch.object(server, "_resolve_song_id") as resolver:
+            text = server.get_current_track(now=1000)
+        resolver.assert_not_called()
+        self.assertIn("Current line", text)
+
+    def test_song_id_fallback_requires_exact_title_and_artist(self):
+        response = {"result": {"songs": [
+            {"id": 77, "name": "Test Song", "artists": [{"name": "Test Artist"}]},
+            {"id": 88, "name": "Test Song Remix", "artists": [{"name": "Test Artist"}]},
+        ]}}
+        with patch.object(server, "netease_request", return_value=response):
+            self.assertEqual(77, server._resolve_song_id("Test Song", "Test Artist"))
+            self.assertIsNone(server._resolve_song_id("Test Song", "Another Artist"))
 
     def test_mcp_exposes_current_tools(self):
         response = server.handle_jsonrpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
@@ -122,7 +147,7 @@ class PlaylistUpdateTests(unittest.TestCase):
         self.assertIn("New name", result)
         self.assertEqual(1, request.call_count)
 
-    def test_update_playlist_preserves_unset_description(self):
+    def test_update_playlist_uses_name_endpoint_only_when_description_is_unset(self):
         calls = []
 
         def fake_request(url, data=None):
@@ -137,9 +162,30 @@ class PlaylistUpdateTests(unittest.TestCase):
             result = server.update_playlist_info(123, name="New name", confirm=True)
         self.assertIn("Updated playlist ID 123", result)
         self.assertEqual(2, len(calls))
+        self.assertIn("playlist/name/update", calls[1][0])
         self.assertEqual("New name", calls[1][1]["name"])
-        self.assertEqual("Original description", calls[1][1]["desc"])
-        self.assertEqual('["rock"]', calls[1][1]["tags"])
+
+    def test_update_playlist_uses_description_endpoint_and_reports_partial_failure(self):
+        calls = []
+
+        def fake_request(url, data=None):
+            calls.append((url, data))
+            if "playlist/detail" in url:
+                return {"playlist": self.owned_playlist()}
+            if "playlist/name/update" in url:
+                return {"code": 200}
+            return {"code": 500, "message": "description rejected"}
+
+        with patch.object(server, "get_uid", return_value=7), \
+                patch.object(server, "get_csrf", return_value="csrf-token"), \
+                patch.object(server, "netease_request", side_effect=fake_request):
+            result = server.update_playlist_info(
+                123, name="New name", description="New description", confirm=True
+            )
+        self.assertIn("Playlist name was updated first", result)
+        self.assertEqual(3, len(calls))
+        self.assertIn("playlist/desc/update", calls[2][0])
+        self.assertEqual("New description", calls[2][1]["desc"])
 
     def test_mcp_exposes_playlist_update_tool(self):
         response = server.handle_jsonrpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
