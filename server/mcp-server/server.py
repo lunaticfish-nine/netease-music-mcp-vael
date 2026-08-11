@@ -327,8 +327,8 @@ def get_owned_playlist(playlist_id):
         return None, "Refused: only playlists created by this account can be edited."
     return playlist, None
 
-def update_playlist_info(playlist_id, name=None, description=None, confirm=False):
-    """Preview or update the name and description of an owned playlist."""
+def update_playlist_info(playlist_id, name=None, description=None):
+    """Immediately update the name and/or description of an owned playlist."""
     if name is None and description is None:
         return "Failed: provide a new name and/or description."
     if name is not None:
@@ -349,10 +349,6 @@ def update_playlist_info(playlist_id, name=None, description=None, confirm=False
     new_description = (description if description is not None
                        else str(playlist.get('description') or '').strip())
     playlist_id = int(playlist['id'])
-    if not confirm:
-        return ("Preview only — playlist ID " + str(playlist_id) + " will become: "
-                "name='" + new_name + "', description='" + new_description +
-                "'. Ask the user to confirm, then call again with confirm=true.")
 
     csrf = get_csrf()
     if not csrf:
@@ -459,7 +455,7 @@ TOOLS = [
     {"name": "remove_from_playlist", "description": "Remove song(s) from a playlist.", "inputSchema": {"type": "object", "properties": {"playlist_id": {"type": "integer", "description": "Playlist ID"}, "song_ids": {"type": "string", "description": "Song ID(s) to remove"}}, "required": ["playlist_id", "song_ids"]}},
     {"name": "list_my_playlists", "description": "List all playlists of the logged-in user.", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "get_playlist_songs", "description": "Get all songs in a playlist.", "inputSchema": {"type": "object", "properties": {"playlist_id": {"type": "integer", "description": "Playlist ID"}}, "required": ["playlist_id"]}},
-    {"name": "update_playlist_info", "description": "Preview or update the name and description of a playlist created by the logged-in user. Use confirm=true only after the user confirms the exact preview.", "inputSchema": {"type": "object", "properties": {"playlist_id": {"type": "integer", "description": "ID of a playlist created by the logged-in user"}, "name": {"type": "string", "description": "Optional replacement playlist name"}, "description": {"type": "string", "description": "Optional replacement description; an empty string clears it"}, "confirm": {"type": "boolean", "description": "Set true only after the user confirms the preview"}}, "required": ["playlist_id"]}},
+    {"name": "update_playlist_info", "description": "Immediately update the name and/or description of a playlist created by the logged-in user.", "inputSchema": {"type": "object", "properties": {"playlist_id": {"type": "integer", "description": "ID of a playlist created by the logged-in user"}, "name": {"type": "string", "description": "Optional replacement playlist name"}, "description": {"type": "string", "description": "Optional replacement description; an empty string clears it"}}, "required": ["playlist_id"]}},
     {"name": "get_play_history", "description": "Get recent play history.", "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "description": "Number of records, default 30"}, "all_time": {"type": "boolean", "description": "true=all time, false=this week (default)"}}}},
     {"name": "get_current_track", "description": "Get the current NetEase Cloud Music track reported by the user's Android phone.", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "like_song", "description": "Like or unlike a song.", "inputSchema": {"type": "object", "properties": {"song_id": {"type": "integer", "description": "Song ID"}, "like": {"type": "boolean", "description": "true=like, false=unlike"}}, "required": ["song_id"]}},
@@ -470,7 +466,7 @@ def handle_jsonrpc(body):
     method = body.get('method', '')
     req_id = body.get('id')
     if method == 'initialize':
-        return {"jsonrpc": "2.0", "id": req_id, "result": {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "netease-music-mcp", "version": "2.3.0"}}}
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "netease-music-mcp", "version": "2.3.1"}}}
     elif method == 'tools/list':
         return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}}
     elif method == 'tools/call':
@@ -490,7 +486,7 @@ def handle_jsonrpc(body):
             text = get_playlist_songs(args.get('playlist_id'))
         elif name == 'update_playlist_info':
             text = update_playlist_info(args.get('playlist_id'), args.get('name'),
-                                        args.get('description'), args.get('confirm', False))
+                                        args.get('description'))
         elif name == 'get_play_history':
             text = get_play_history(args.get('limit', 30), args.get('all_time', False))
         elif name == 'get_current_track':
