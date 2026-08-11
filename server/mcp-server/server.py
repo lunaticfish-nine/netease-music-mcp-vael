@@ -356,7 +356,7 @@ def update_playlist_info(playlist_id, name=None, description=None):
     name_changed = name is None
     if name is not None:
         name_response = netease_request(
-            'https://music.163.com/api/playlist/name/update?csrf_token=' + csrf,
+            'https://music.163.com/api/playlist/update/name?csrf_token=' + csrf,
             data={'id': str(playlist_id), 'name': new_name},
         )
         if name_response.get('code') != 200:
