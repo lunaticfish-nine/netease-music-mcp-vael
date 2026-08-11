@@ -135,17 +135,23 @@ class PlaylistUpdateTests(unittest.TestCase):
         collected["creator"] = {"userId": 8}
         with patch.object(server, "get_uid", return_value=7), \
                 patch.object(server, "netease_request", return_value={"playlist": collected}) as request:
-            result = server.update_playlist_info(123, name="New name", confirm=True)
+            result = server.update_playlist_info(123, name="New name")
         self.assertIn("Refused", result)
         self.assertEqual(1, request.call_count)
 
-    def test_update_playlist_preview_does_not_write(self):
+    def test_update_playlist_writes_without_confirmation(self):
+        def fake_request(url, data=None):
+            if "playlist/detail" in url:
+                return {"playlist": self.owned_playlist()}
+            return {"code": 200}
+
         with patch.object(server, "get_uid", return_value=7), \
-                patch.object(server, "netease_request", return_value={"playlist": self.owned_playlist()}) as request:
+                patch.object(server, "get_csrf", return_value="csrf-token"), \
+                patch.object(server, "netease_request", side_effect=fake_request) as request:
             result = server.update_playlist_info(123, name="New name")
-        self.assertIn("Preview only", result)
+        self.assertIn("Updated playlist ID 123", result)
         self.assertIn("New name", result)
-        self.assertEqual(1, request.call_count)
+        self.assertEqual(2, request.call_count)
 
     def test_update_playlist_uses_name_endpoint_only_when_description_is_unset(self):
         calls = []
@@ -159,7 +165,7 @@ class PlaylistUpdateTests(unittest.TestCase):
         with patch.object(server, "get_uid", return_value=7), \
                 patch.object(server, "get_csrf", return_value="csrf-token"), \
                 patch.object(server, "netease_request", side_effect=fake_request):
-            result = server.update_playlist_info(123, name="New name", confirm=True)
+            result = server.update_playlist_info(123, name="New name")
         self.assertIn("Updated playlist ID 123", result)
         self.assertEqual(2, len(calls))
         self.assertIn("playlist/name/update", calls[1][0])
@@ -180,7 +186,7 @@ class PlaylistUpdateTests(unittest.TestCase):
                 patch.object(server, "get_csrf", return_value="csrf-token"), \
                 patch.object(server, "netease_request", side_effect=fake_request):
             result = server.update_playlist_info(
-                123, name="New name", description="New description", confirm=True
+                123, name="New name", description="New description"
             )
         self.assertIn("Playlist name was updated first", result)
         self.assertEqual(3, len(calls))
@@ -192,6 +198,9 @@ class PlaylistUpdateTests(unittest.TestCase):
         names = [tool["name"] for tool in response["result"]["tools"]]
         self.assertEqual(11, len(names))
         self.assertIn("update_playlist_info", names)
+        update_tool = next(tool for tool in response["result"]["tools"]
+                           if tool["name"] == "update_playlist_info")
+        self.assertNotIn("confirm", update_tool["inputSchema"]["properties"])
 
     def test_report_endpoint_and_mcp_tool_work_end_to_end(self):
         httpd = server.ThreadedHTTPServer(("127.0.0.1", 0), server.MCPHandler)
